@@ -19,4 +19,4 @@ A module of routines and helper functions related to image recognition and analy
 - Fitting and using a transform that makes an integer-valued grid from a set of scattered points, useful for assigning array indices to objects
 - Specific fitting routines for improving the accuracy of position information of calorimeter measurement targets
 
-The extension for weighted estimation of projective transformations is now in the next release candidate for `skimage`, so it might soon be redundant here!
+The extension for weighted estimation of projective transformations is now in the next release candidate for `skimage`, 0.19.0rc0, so it might soon be redundant here!
