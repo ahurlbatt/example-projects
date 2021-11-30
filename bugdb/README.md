@@ -5,6 +5,10 @@ The current BUG database, which has grown organically over the last 20 years, is
 
 **High level functions**
 
+* `TimeTrace(shot_num: int, module: str = "A", sample_rate: int = None, force_cache_refresh: bool = False)`
+
+ Create a queryable TimeTrace object for the provided shot number and Gantner module.
+
 * `fetch_shot_params(shot_nums)`
 
  Return a DF containing basic information for a given shot number of list of shot numbers.
@@ -24,10 +28,6 @@ The current BUG database, which has grown organically over the last 20 years, is
 * `get_current_shot_num()`
 
  Return the current experiment shot number.
-
-* `TimeTrace(shot_num: int, module: str = "A", sample_rate: int = None, force_cache_refresh: bool = False)`
-
- Create a queryable TimeTrace object for the provided shot number and Gantner module.
  
 **Example Use**
 ```
