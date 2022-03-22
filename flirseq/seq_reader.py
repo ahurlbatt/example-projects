@@ -1,6 +1,6 @@
 """
 This module contains reader objects and methods for obtaining data from FLIR SEQ and FFF infrared imaging files.
-As well as the ability to create interrogation objects and fine tune conversions, there are high level functions 
+As well as the ability to create interrogation objects and fine tune conversions, there are high level functions
 for bulk reading and conversion of files.
 """
 
@@ -10,59 +10,35 @@ import math
 
 from flirseq import fff_reader_objs as fff_read
 from flirseq import fff_module_constants as MOD
-from flirseq import infroptics
+from flirseq import ir_imaging
 
 
-class FrameNotFoundError(Exception):
-    """Raised if a frame is requested that doesn't exist."""
-
-    def __init__(self, frame_number: int, n_frames: int):
-        self.frame_number = frame_number
-        self.n_frames = n_frames
-
-    def __str__(self):
-        if self.n_frames is None:
-            return f"Invalid from number requested: {self.frame_number}"
-        else:
-            return f"Invalid from number requested: {self.frame_number} (of possible {self.n_frames})"
-
-
-class MissingInfoError(Exception):
-    """ Raised if information for a requested action has not yet been provided. """
-
-    def __init__(self, missing_info: str, requested_action: str = None):
-        self.missing_info = missing_info
-        self.requested_action = requested_action
-
-    def __str__(self):
-        if self.requested_action is None:
-            return f"Information/Data missing: {self.missing_info}."
-        else:
-            return f"Information/Data missing for {self.requested_action}: {self.missing_info}."
-
-
-def seq_to_kelvin(file: str, optics, background_temperature: float, object_emittance: float, frames="all"):
-    """
-    Extract the data from a given SEQ file and use the provided environmental parameters to convert the images into 
-    the temperature of the object in Kelvin.
+def seq_to_kelvin(
+    file: str,
+    target_object: ir_imaging.TargetObject,
+    object_system: list,
+    detector_temperature: float = None,
+    frames="all",
+):
+    """Extract the data from a given SEQ file and use the provided environmental parameters to convert the images into
+        the temperature of the object in Kelvin.
 
     Parameters
     ----------
     file : str/path
         Path to the file that contains the frame data.
-    optics : list[optics]
-        A list of optical components (including air) between the camera and the object
-        optics[0] is closest to the camera.
-    background_temperature : float
-        Temperature of the background environment in Kelvin.
-    object_emittance : float
-        Emittance of the object of interest in the interval [0, 1].
+    target_object : ir_imaging.TargetObject
+        Description of the object being imaged.
+    object_system : list
+        A list of object between the camera and the target.
+    detector_temperature : float, optional
+        A value of the detector temperature to override built in sensors.
     frames : list/int, optional
         A list of which frames to read. The default is 'all'.
 
     Returns
     -------
-    Kelvin: list
+    kelvin: list
         List of np.ndarray, each of which is an image in Kelvin
     s: SeqData
         The containing object, if more things need to be done with it
@@ -75,50 +51,40 @@ def seq_to_kelvin(file: str, optics, background_temperature: float, object_emitt
     # Read the requested frames
     s.read(frames)
 
-    # Apply the optical set up
-    s.optics = optics
+    # Apply the system of objects
+    s.target_object = target_object
+    s.object_system = object_system
 
-    # Set the background temperature and object emittance
-    s.set_background_temperature(background_temperature)
-    s.set_object_emittance(object_emittance)
+    # Override the detector temperature if requested
+    if detector_temperature is not None:
+        s.detector_temperature = detector_temperature
 
     # Calculate values in Kelvin for each of the frames read
     return s.kelvin, s
 
 
 class SeqData:
-    """
-    This is a container for a FLIR .seq ('sequence') file, which itself is just a bunch of FFF (FLIR File Format)
-    frames concatenated into the same file. On initialisation with a given file name, the file is parsed to determine
-    the total number of frames and to read header information for each.
-    
+    """Container for a FLIR .seq ('sequence') file, which itself is just a bunch of FFF (FLIR File Format) frames
+
+    On initialisation with a given file name, the file is parsed to determine the total number of frames and to read
+    header information for each.
+
     After initialisation, frames can be read from disk individually, in any order, using 'read(readme)', where 'readme'
     is either of the keywords 'all' or 'last', or a list of integer indices, or a single index. Negative indexing is
     supported, and the default is 'all'.
 
-    A list of the optics between the camera and the object must be provided before any values of object radiance or
-    temperature can be obtained. These are defined in the 'infroptics' module.'
+    A list of the objects between the camera and the target object must be provided before any values of object
+    radiance or temperature can be obtained. These are defined in the 'ir_imaging' module.
 
     Calculated radiances and temperatures are accessed as attributes, and only calculated on invocation. These are
-    purposefully not cached, so that values can be returned with different optics if needed for advanced use.
+    purposefully not cached, so that values can be returned with different conditions if needed for advanced use.
 
-    Selected Methods
-    ----------------
-    read(frames="all")
-        Invoke the read method of the specified frames to extract their data from the SEQ file. 'frames' can be a
-        single integer, an iterable of ints, or the keywords "last" or "all".
-    set_background_temperature(temperature: float)
-        Provide the temperature of the background, in Kelvin, to use in calculating object radiances and temperatures.
-    def set_object_emittance(object_emittance: float)
-        Provide the surface emittance of the object being imaged, for calculating the estimated surface radiance and
-        temperature.
-    
     Selected Attributes
     ----------
     frames : list of <FFF>
         All of the frames contained in this file. See class FFF for details.
-    optics : list of <infroptics.Optics>
-        The optical objects appearing between the camera and the target.
+    object_system : list of <ir_imaging.InfraredObject>
+        The objects appearing between the camera and the target.
     measured_radiance : list of (N, M) array
         The measured radiance from each of the frames that have been read from the file.
     object_radiance : list of (N, M) array
@@ -129,7 +95,7 @@ class SeqData:
         The times (in seconds) of each frame relative to the first.
     frame_times_absolute : (N, ) array of DateTime.DateTime
         The absolute times of each frame as recorded by the camera.
-    
+
     """
 
     def __repr__(self):
@@ -137,26 +103,11 @@ class SeqData:
         str_out = "   <SEQ File>"
         str_out += f"\n {self.n_frames} Frames ({len([1 for f in self.frames if f.is_read])} read)"
 
-        if hasattr(self, "optics"):
-            str_out += "\n Has optics"
-        else:
-            str_out += "\n NO optics"
-
-        if hasattr(self, "background"):
-            str_out += "\n Has background"
-        else:
-            str_out += "\n NO background"
-
-        if hasattr(self, "object_emittance"):
-            str_out += "\n Has object emittance"
-        else:
-            str_out += "\n NO object emittance"
-
         return str_out
 
     def __init__(self, file: str):
         """
-        Opens a given file (probably with .seq extension) and parses binary data for header information of the frames 
+        Opens a given file (probably with .seq extension) and parses binary data for header information of the frames
         contained within, finding all of the frames in the file.
 
         Parameters
@@ -219,80 +170,64 @@ class SeqData:
         # Catch any out of range indices before starting the read, as reading is expensive
         if any(x >= self.n_frames or x < -self.n_frames for x in frames):
             bad_frames = [x for x in frames if x >= self.n_frames or x < -self.n_frames]
-            raise FrameNotFoundError(bad_frames[0], self.n_frames)
+            raise RuntimeError(f"Invalid from number requested: {bad_frames[0]} (of possible {self.n_frames})")
 
         # Tell each frame to be read
         for ff in frames:
             self.frames[ff].read()
 
-        # Grab the camera calibration from the first frame that's been read
-        self.CameraCalibration = self.frames[frames[0]].CameraCalibration
+        # Take one frame as a reference frame through which further calibrations and calculations can be made.
+        # It is assumed that all the frames were taken with the same camera under the same conditions!
+        self.reference_frame = self.frames[frames[0]]
 
     @property
-    def optics(self):
-        return self._optics
+    def detector_temperature(self):
+        return self.reference_frame.detector_temperature
 
-    @optics.setter
-    def optics(self, optics_in):
-        """ Create the list of optical components between the camera and the object. First in the list are those
-		closest to the camera. """
+    @detector_temperature.setter
+    def detector_temperature(self, temperature: float):
+        self.reference_frame.detector_temperature = temperature
 
-        # Overwrite the current optics with the provided one
-        self._optics = optics_in
+    @property
+    def detector(self):
+        return self.reference_frame.detector
 
-        # Assume they're not calibrated, so try to calibrate. If it's not iterable, we've only got one.
-        try:
-            [o.calibrate(self.CameraCalibration) for o in self._optics]
-        except TypeError:
-            self._optics = [optics_in]
-            [o.calibrate(self.CameraCalibration) for o in self._optics]
-        except AttributeError:
-            raise TypeError("Adding optics requires Optics objects or a list thereof.")
+    @property
+    def object_system(self):
+        return self.reference_frame.object_system
 
-        # Once we're sure all the optics are correct, add them to each frame
-        for f in self.frames:
-            f.optics = self._optics
+    @object_system.setter
+    def object_system(self, object_system: list):
+        self.reference_frame.object_system = object_system
 
-    def set_background_temperature(self, temperature: float):
-        """ Create and calibrate a background temperature for radiance reflections, then copy it to the frames. """
+    @property
+    def target_object(self):
+        return self.reference_frame.target_object
 
-        self.background = infroptics.Background(temperature)
-        self.background.calibrate(self.CameraCalibration)
-
-        for f in self.frames:
-            f.set_background(self.background)
-
-    def set_object_emittance(self, object_emittance: float):
-        """ Record the estimated emittance of the object of interest. """
-
-        self.object_emittance = object_emittance
-
-        for f in self.frames:
-            f.set_object_emittance(self.object_emittance)
+    @target_object.setter
+    def target_object(self, target_object: ir_imaging.TargetObject):
+        self.reference_frame.target_object = target_object
 
     @property
     def measured_radiance(self):
-        return [f.RadianceApparent for f in self.frames if f.is_read]
+        return [f.measured_radiance for f in self.frames if f.is_read]
 
     @property
     def object_radiance_coefficients(self):
-        return infroptics.find_radiance_coefficients(self.object_emittance, self.optics, self.background)
+        return ir_imaging.find_radiance_coefficients(
+            self.reference_frame.target_object, self.reference_frame.detector, self.reference_frame.object_system
+        )
 
     @property
     def object_radiance(self):
         """ Get the estimated object radiance for all the frames that have been read. """
         coeffs = self.object_radiance_coefficients
-        return [coeffs[0] * f.RadianceApparent + coeffs[1] for f in self.frames if f.is_read]
+        return [coeffs[0] * radiance + coeffs[1] for radiance in self.measured_radiance]
 
     @property
     def kelvin(self):
         """ Get the esimated object temperature for all the frames that have been read. """
-        return [
-            infroptics.radiance_to_temp(
-                M, self.CameraCalibration["R"], self.CameraCalibration["B"], self.CameraCalibration["F"]
-            )
-            for M in self.object_radiance
-        ]
+        return [radiance_o.temperature for radiance_o in self.object_radiance]
 
     @property
     def frame_times_absolute(self):
@@ -309,16 +244,16 @@ class SeqData:
 class FFF:
     """
     The FLIR File Format (FFF) is a binary storage format for images and additional information from FLIR infrared
-    cameras, as created by the ResearchIR program. Every frame has a Header and a list of Indexes detailing the 
+    cameras, as created by the ResearchIR program. Every frame has a Header and a list of Indexes detailing the
     contents of the frame. Each Index corresponds to a data block and describes the type of data stored there.
-    Possible data types are information on the camera status, calibration factors, image data, correction factors, 
+    Possible data types are information on the camera status, calibration factors, image data, correction factors,
     data from other sensors, and more. Each block is typically a nested structure of some of the data types.
-    
-    The details of the possible data types and their translation from binary have been put together through a 
-    combination of spotty documentation and reverse engineering. As such, although names are known for most of the 
+
+    The details of the possible data types and their translation from binary have been put together through a
+    combination of spotty documentation and reverse engineering. As such, although names are known for most of the
     parameters and data types available, their actual use and meaning is not necessarily clear. No guarantee is made on
     the accuracy or interpretation of the data, and testing has only been performed on data from a particular system.
-    
+
     Attributes
     ----------
     file : str/path
@@ -333,10 +268,10 @@ class FFF:
         The last byte of this frame. Used for SEQ files to know where the next frame starts.
     is_read : Bool
         True if the data from the data blocks has been read.
-    
+
     Other attributes are created when read() is called. Each descriptor (may) create a new attribute of a type found
     in fff_reader_objs.
-    
+
     """
 
     def __repr__(self):
@@ -394,7 +329,7 @@ class FFF:
     def read(self, file, startbyte):
         """
         Look at each descriptor in turn and read the data block described by it. Each descriptor gives the location and
-        type of data as an index. The data type is converted into a reader class using the FFF_TAG_READER_OBJ dict, 
+        type of data as an index. The data type is converted into a reader class using the FFF_TAG_READER_OBJ dict,
         which is then told where to start reading from. The string name of the data type is used to name a new attribute
         of this frame to contain the data that has been read.
 
@@ -433,23 +368,32 @@ class FFF:
             else:
                 setattr(self, index.tagtype, my_reader_class(file, my_start_byte, index.dwDataSize))
 
-        # Extract the camera calibration parameters
-        self.CameraCalibration = {REDACTED}
+        # Extract the calibration parameters between radiance/temperature
+        self.CameraCalibration = ir_imaging.DetectorCalibration(
+            REDACTED
+        )
+
+        # Get the calibration parameters from raw signal to radiance
+        self.SignalCalibration = {
+            REDACTED
+        }
 
         # Extract the Radiance values from the pixels, if they are raw counts
         # Other types of pixel values are not supported
         if self.REDACTED == 1:
 
-            # Pixels also need trimming based on the REDACTED provided
+            # Pixels also need trimming based on the GeomInfo provided
             x1 = self.REDACTED
             x2 = self.REDACTED
             y1 = self.REDACTED
             y2 = self.REDACTED
 
             # Conversion from raw signal into Radiance using camera's calibrated offset and gain.
-            self.RadianceApparent = (
-                self.Pixels.pixels[y1:y2, x1:x2] + self.CameraCalibration["offset"]
-            ) * self.CameraCalibration["gain"]
+            self.measured_radiance = ir_imaging.CalibratedRadiance(
+                radiance=(self.Pixels.pixels[y1:y2, x1:x2] + self.SignalCalibration["offset"])
+                * self.SignalCalibration["gain"],
+                calibration=self.CameraCalibration,
+            )
 
         else:
             raise NotImplementedError(f"Pixels of type {self.REDACTED} not yet supported.")
@@ -458,58 +402,54 @@ class FFF:
         self.is_read = True
 
     @property
-    def optics(self):
-        return self._optics
-
-    @optics.setter
-    def optics(self, optics_in):
-        """ Create or add to the list of optical components between the camera and the object. First in the list are
-        those closest to the camera. """
-
-        # Overwrite the current optics with the provided one
-        self._optics = optics_in
-
-        # Try to calibrate if anything isn't yet. If it's not iterable, we've only got one.
+    def detector_temperature(self):
         try:
-            [o.calibrate(self.CameraCalibration) for o in self._optics if not o.is_calibrated]
-        except TypeError:
-            self._optics = [optics_in]
-            [o.calibrate(self.CameraCalibration) for o in self._optics if not o.is_calibrated]
+            return self._detector_temperature
         except AttributeError:
-            raise TypeError("Adding optics requires Optics objects or a list thereof.")
+            if self.is_read:
+                return self.REDACTED
+            else:
+                raise RuntimeError("Detector properties not available: Frame not read.")
 
-    def set_background(self, background):
-        """ Apply a calibrated radiance background for this frame """
+    @detector_temperature.setter
+    def detector_temperature(self, temperature: float):
+        self._detector_temperature = temperature
 
-        self.background = background
+    @property
+    def detector(self):
+        if self.is_read:
+            return ir_imaging.Detector(self.detector_temperature, self.CameraCalibration)
+        else:
+            raise RuntimeError("Detector properties not available: Frame not read.")
 
-    def set_object_emittance(self, object_emittance):
-        """ Record the estimated emittance of the object of interest. """
+    @property
+    def object_system(self):
+        try:
+            return self._object_system
+        except AttributeError:
+            raise RuntimeError("No infrared object system set.")
 
-        self.object_emittance = object_emittance
+    @object_system.setter
+    def object_system(self, object_system: list):
+        self._object_system = object_system
+
+    @property
+    def target_object(self):
+        try:
+            return self._target_object
+        except AttributeError:
+            raise RuntimeError("No target object set.")
+
+    @target_object.setter
+    def target_object(self, target_object: ir_imaging.TargetObject):
+        self._target_object = target_object
 
     @property
     def object_radiance(self):
-        """
-        Pass the optical system and observed radiance to the optics module for calculating an estimated object radiance.
-
-        """
-
-        if not hasattr(self, "_optics"):
-            raise MissingInfoError("Optical Components", "Object Radiance Calculation")
-
-        if not hasattr(self, "background"):
-            raise MissingInfoError("Background Temperature", "Object Radiance Calculation")
-
-        # Calculate and use a conversion from Apparent to Object radiance according to the optical system
-        return infroptics.find_object_radiance(
-            self.RadianceApparent, self.object_emittance, self._optics, self.background
+        return ir_imaging.find_object_radiance(
+            self.measured_radiance, self.target_object, self.detector, self.object_system
         )
 
     @property
     def kelvin(self):
-        """ Use the camera calibrations to convert the estimated object radiance into degrees Kelvin """
-
-        return infroptics.radiance_to_temp(
-            self.object_radiance, self.CameraCalibration["R"], self.CameraCalibration["B"], self.CameraCalibration["F"]
-        )
+        return self.object_radiance.temperature
